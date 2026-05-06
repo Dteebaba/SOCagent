@@ -1,0 +1,8 @@
+*.pkl
+*.csv
+test_*.csv
+__pycache__/
+*.pyc
+logs/
+*.log
+.env
