@@ -21,7 +21,8 @@ from executor import BLOCKED_IPS_LOG, FIREWALL_LOG, PIPELINE_SUMMARY_LOG
 from pipeline import run_pipeline
 
 # FIXED: Updated file paths
-DATA_PATH = Path(__file__).parent / "test_data_clean.csv"
+# DATA_PATH = Path(__file__).parent / "test_data_clean.csv"
+DATA_PATH = Path(__file__).parent / "sample_data_1k.csv"
 LOGS_DIR = Path(__file__).parent / "logs"
 
 SEVERITY_COLOUR = {
