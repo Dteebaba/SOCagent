@@ -307,30 +307,30 @@ def _render_firewall_tab(result) -> None:
 def _render_chat_tab(result) -> None:
     """Render the AI chat interface for asking questions about results."""
     st.subheader("💬 Ask AI About Results")
-    
+
     # Check if chat assistant is available
     if st.session_state.chat_assistant is None:
         st.error("⚠️ Chat feature requires OPENAI_API_KEY to be set in Streamlit Secrets.")
         st.info("Go to Streamlit Cloud → App Settings → Secrets → Add: OPENAI_API_KEY")
         return
-    
+
     if result is None:
         st.info("👆 Run the pipeline first, then come back here to ask questions about the results!")
         return
-    
+
     st.markdown("**Select what you want to analyze:**")
-    
+
     # Result type selector
     result_type = st.radio(
         "Choose result type:",
         ["Classified Flow", "Threat Finding", "AI Decision", "General Question"],
         horizontal=True
     )
-    
+
     # Context selector based on type
     selected_context = None
     context_data = None
-    
+
     if result_type == "Classified Flow" and result.classified_df is not None:
         flow_options = [
             f"Flow #{i}: {row['attack_type']} ({row['confidence']:.2%})"
@@ -339,9 +339,16 @@ def _render_chat_tab(result) -> None:
         if flow_options:
             selected = st.selectbox("Select a flow:", flow_options)
             flow_idx = int(selected.split("#")[1].split(":")[0])
-            context_data = result.classified_df.loc[flow_idx].to_dict()
+            # Convert numpy types to Python types
+            row_data = result.classified_df.loc[flow_idx].to_dict()
+            context_data = {
+                k: (int(v) if isinstance(v, (np.integer,)) else 
+                    float(v) if isinstance(v, (np.floating,)) else 
+                    str(v) if isinstance(v, (np.str_, np.unicode_)) else v)
+                for k, v in row_data.items()
+            }
             selected_context = "flow"
-    
+
     elif result_type == "Threat Finding" and result.findings:
         finding_options = [
             f"{f.rule_id}: {f.description[:50]}... ({f.severity})"
@@ -361,7 +368,7 @@ def _render_chat_tab(result) -> None:
                 'evidence': f.evidence
             }
             selected_context = "finding"
-    
+
     elif result_type == "AI Decision" and result.decisions:
         decision_options = [
             f"{d.get('action', 'UNKNOWN')}: {d.get('attack_type', 'Unknown')} ({d.get('severity', 'MEDIUM')})"
@@ -372,7 +379,7 @@ def _render_chat_tab(result) -> None:
             decision_idx = decision_options.index(selected)
             context_data = result.decisions[decision_idx]
             selected_context = "decision"
-    
+
     elif result_type == "General Question":
         context_data = {
             'records_processed': result.records_processed,
@@ -382,21 +389,21 @@ def _render_chat_tab(result) -> None:
             'decisions_count': len(result.decisions)
         }
         selected_context = "general"
-    
+
     # Show suggested questions
     if selected_context:
         st.markdown("**💡 Suggested questions:**")
         suggestions = st.session_state.chat_assistant.get_suggested_questions(selected_context)
-        
+
         cols = st.columns(2)
         for i, suggestion in enumerate(suggestions[:4]):
             with cols[i % 2]:
                 if st.button(suggestion, key=f"suggestion_{i}", use_container_width=True):
                     st.session_state.pending_question = suggestion
-    
+
     # Chat interface
     st.divider()
-    
+
     # Display chat history
     for msg in st.session_state.chat_history:
         role = msg['role']
@@ -412,7 +419,7 @@ def _render_chat_tab(result) -> None:
             """,
             unsafe_allow_html=True
         )
-    
+
     # Question input
     question = st.text_input(
         "Ask your question:",
@@ -420,7 +427,7 @@ def _render_chat_tab(result) -> None:
         key="question_input",
         placeholder="Type your question here..."
     )
-    
+
     col1, col2 = st.columns([1, 5])
     with col1:
         ask_btn = st.button("Ask AI", type="primary", use_container_width=True)
@@ -431,7 +438,7 @@ def _render_chat_tab(result) -> None:
             if 'pending_question' in st.session_state:
                 del st.session_state['pending_question']
             st.rerun()
-    
+
     # Process question
     if ask_btn and question and selected_context and context_data:
         with st.spinner("🤔 AI is thinking..."):
@@ -445,17 +452,17 @@ def _render_chat_tab(result) -> None:
                     answer = st.session_state.chat_assistant.analyze_decision(context_data, question)
                 else:  # general
                     answer = st.session_state.chat_assistant.general_question(context_data, question)
-                
+
                 # Add to chat history
                 st.session_state.chat_history.append({"role": "user", "content": question})
                 st.session_state.chat_history.append({"role": "assistant", "content": answer})
-                
+
                 # Clear pending question
                 if 'pending_question' in st.session_state:
                     del st.session_state['pending_question']
-                
+
                 st.rerun()
-                
+
             except Exception as e:
                 st.error(f"Error: {str(e)}")
 
@@ -552,7 +559,7 @@ else:
                 st.dataframe(hist, use_container_width=True)
         except Exception:
             pass
-    
+
     # Show chat tab with last result if available
     if 'last_result' in st.session_state:
         st.divider()
