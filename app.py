@@ -339,14 +339,19 @@ def _render_chat_tab(result) -> None:
         if flow_options:
             selected = st.selectbox("Select a flow:", flow_options)
             flow_idx = int(selected.split("#")[1].split(":")[0])
-            # Convert numpy types to Python types
-            row_data = result.classified_df.loc[flow_idx].to_dict()
-            context_data = {
-                k: (int(v) if isinstance(v, (np.integer,)) else 
-                    float(v) if isinstance(v, (np.floating,)) else 
-                    str(v) if isinstance(v, (np.str_, np.unicode_)) else v)
-                for k, v in row_data.items()
-            }
+            # Convert to dict and handle numpy types
+            row_data = result.classified_df.loc[flow_idx]
+
+            # Convert all values to Python native types
+            context_data = {}
+            for k, v in row_data.items():
+                if hasattr(v, 'item'):  # numpy scalar
+                    context_data[k] = v.item()
+                elif isinstance(v, (list, dict)):
+                    context_data[k] = v
+                else:
+                    context_data[k] = str(v) if v is not None else None
+
             selected_context = "flow"
 
     elif result_type == "Threat Finding" and result.findings:
