@@ -21,7 +21,7 @@ from pipeline import run_pipeline
 from chat_assistant import ResultsChatAssistant
 
 # File paths
-DATA_PATH = Path(__file__).parent / "sample_data_1k.csv"
+DATA_PATH = Path(__file__).parent / "sample_data_5k.csv"
 LOGS_DIR = Path(__file__).parent / "logs"
 
 # Color schemes
@@ -57,12 +57,6 @@ st.markdown(
     }
     .finding-card.CRITICAL { border-left-color: #ef4444; }
     .finding-card.HIGH     { border-left-color: #f97316; }
-    .chat-message {
-        background: #1e2130; border-radius: 8px; padding: 12px;
-        margin: 8px 0; border-left: 3px solid #3b82f6;
-    }
-    .user-message { border-left-color: #22c55e; }
-    .ai-message { border-left-color: #3b82f6; }
     h1, h2, h3 { color: #e2e8f0; }
     </style>
     """,
@@ -124,16 +118,33 @@ def _check_prerequisites() -> tuple[bool, str]:
 
 
 def _render_metric_row(result) -> None:
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Records Processed", f"{result.records_processed:,}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Dataset Rows Analyzed", f"{result.records_processed:,}")
     c2.metric(
-        "Attacks Detected",
+        "Threats Discovered",
         f"{result.attacks_detected:,}",
-        delta=f"{result.attacks_detected / max(result.records_processed, 1) * 100:.1f}%",
+        delta=f"{result.attacks_detected / max(result.records_processed, 1) * 100:.1f}% of dataset",
     )
-    c3.metric("Threat Findings", len(result.findings))
-    c4.metric("AI Decisions", len(result.decisions))
-    c5.metric(
+    c3.metric("Benign Found", f"{result.benign_count:,}")
+
+    with st.expander("ℹ️ What counts as a Threat?"):
+        st.markdown(
+            "**Threats Discovered** = network flows the Random Forest model classified as "
+            "any non-Benign label from the CIC-DDoS2019 dataset. This includes:\n\n"
+            "- **DrDoS amplification variants**: DrDoS_DNS, DrDoS_LDAP, DrDoS_MSSQL, "
+            "DrDoS_NTP, DrDoS_NetBIOS, DrDoS_SNMP, DrDoS_UDP\n"
+            "- **Direct flood attacks**: LDAP, MSSQL, NetBIOS, Portmap, Syn, TFTP, "
+            "UDP, UDP-lag, UDPLag, WebDDoS\n\n"
+            "**Benign Found** = flows the model identified as normal, non-malicious traffic.\n\n"
+            "*Note: Because Benign samples are part of the training distribution, the model "
+            "classifies them correctly — Benign flows are not counted as threats.*"
+        )
+
+    st.markdown("")
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Threat Findings (Rule-Based)", len(result.findings))
+    c5.metric("AI Decisions", len(result.decisions))
+    c6.metric(
         "Actions Blocked",
         result.execution_counts.get("blocked", 0),
         delta_color="inverse",
@@ -411,19 +422,8 @@ def _render_chat_tab(result) -> None:
 
     # Display chat history
     for msg in st.session_state.chat_history:
-        role = msg['role']
-        content = msg['content']
-        css_class = "user-message" if role == "user" else "ai-message"
-        icon = "👤" if role == "user" else "🤖"
-        st.markdown(
-            f"""
-            <div class="chat-message {css_class}">
-                {icon} <strong>{role.upper()}:</strong><br/>
-                {content}
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        with st.chat_message(msg['role']):
+            st.markdown(msg['content'])
 
     # Question input
     question = st.text_input(
@@ -518,7 +518,8 @@ if run_btn:
 
     st.success(
         f"Pipeline complete in {result.duration_seconds:.2f}s — "
-        f"{result.records_processed:,} records · {result.attacks_detected:,} attacks · "
+        f"{result.records_processed:,} rows analyzed · {result.attacks_detected:,} threats · "
+        f"{result.benign_count:,} benign · "
         f"{len(result.findings)} findings · {len(result.decisions)} AI decisions"
     )
 

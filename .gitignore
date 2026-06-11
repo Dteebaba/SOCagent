@@ -1,5 +1,6 @@
 *.pkl
 *.csv
+!sample_data_5k.csv
 test_*.csv
 __pycache__/
 *.pyc

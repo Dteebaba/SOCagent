@@ -1,11 +1,13 @@
 """
 hunter.py
-Three threat hunting rules built around CIC-DDoS2019 features.
+Five threat hunting rules built around CIC-DDoS2019 features.
 No IPs in this dataset - hunting is done in feature space.
 
-Rule 1 - Temporal Cluster    : 5+ same attack type flows in 30 second window
+Rule 1 - Temporal Cluster    : 5+ same attack type flows in rolling window
 Rule 2 - Low Confidence Flag : Classifier confidence between 0.5 and 0.75
 Rule 3 - Benign Anomaly      : Benign flow with suspiciously high packet rate
+Rule 4 - High Volume Burst   : Single attack type dominates >20% of all flows
+Rule 5 - Multi-Vector Attack : 3+ distinct attack types in same batch
 """
 
 import logging
@@ -22,6 +24,8 @@ CLUSTER_THRESHOLD = 5  # Min same-type flows to trigger
 LOW_CONF_MIN = 0.50  # Low confidence lower bound
 LOW_CONF_MAX = 0.75  # Low confidence upper bound
 BENIGN_PACKET_RATE_MULTIPLIER = 3.0  # How many times above mean to flag
+HIGH_VOLUME_THRESHOLD = 0.20  # Single attack type share to trigger R004
+MULTI_VECTOR_MIN_TYPES = 3  # Distinct attack types required for R005
 
 
 @dataclass
@@ -79,6 +83,8 @@ class ThreatHunter:
         findings.extend(self._rule1_temporal_cluster(df))
         findings.extend(self._rule2_low_confidence(df))
         findings.extend(self._rule3_benign_anomaly(df))
+        findings.extend(self._rule4_high_volume_burst(df))
+        findings.extend(self._rule5_multi_vector_attack(df))
 
         logger.info(
             "Hunting complete: %d findings from %d flows", len(findings), len(df)
@@ -259,6 +265,120 @@ class ThreatHunter:
             "Rule 3 triggered: %d anomalous benign flows above threshold %.2f",
             len(anomalous),
             threshold,
+        )
+
+        return findings
+
+    def _rule4_high_volume_burst(self, df: pd.DataFrame) -> list:
+        """
+        Rule 4 - High Volume Burst
+        Flags any single attack type that accounts for more than 20% of all
+        flows in the batch. Indicates a dominant, large-scale attack campaign
+        rather than scattered probes.
+        """
+        findings = []
+
+        if df.empty or "attack_type" not in df.columns:
+            return findings
+
+        attack_flows = df[df["is_attack"] == True]
+        if attack_flows.empty:
+            return findings
+
+        total_flows = len(df)
+        type_counts = attack_flows["attack_type"].value_counts()
+
+        for attack_type, count in type_counts.items():
+            share = count / total_flows
+            if share >= HIGH_VOLUME_THRESHOLD:
+                avg_confidence = attack_flows[
+                    attack_flows["attack_type"] == attack_type
+                ]["confidence"].mean()
+
+                findings.append(
+                    HuntingFinding(
+                        rule_id="R004",
+                        rule_name="High Volume Attack Burst",
+                        severity="HIGH" if share >= 0.40 else "MEDIUM",
+                        description=(
+                            f"Dominant attack campaign: {attack_type} comprises "
+                            f"{share*100:.1f}% of all observed flows "
+                            f"({count}/{total_flows})"
+                        ),
+                        evidence={
+                            "attack_type": attack_type,
+                            "flow_count": int(count),
+                            "total_flows": total_flows,
+                            "share_percent": round(share * 100, 2),
+                            "avg_confidence": round(avg_confidence, 4),
+                            "threshold_percent": HIGH_VOLUME_THRESHOLD * 100,
+                        },
+                        affected_flows=int(count),
+                        flow_indices=list(
+                            attack_flows[attack_flows["attack_type"] == attack_type].index
+                        ),
+                    )
+                )
+                logger.warning(
+                    "Rule 4 triggered: %s dominates at %.1f%% of flows",
+                    attack_type,
+                    share * 100,
+                )
+
+        return findings
+
+    def _rule5_multi_vector_attack(self, df: pd.DataFrame) -> list:
+        """
+        Rule 5 - Multi-Vector Attack Detection
+        Fires when 3 or more distinct attack types appear in the same batch.
+        Multi-vector DDoS campaigns are significantly harder to mitigate and
+        indicate sophisticated, coordinated threat actors.
+        """
+        findings = []
+
+        if df.empty or "attack_type" not in df.columns:
+            return findings
+
+        attack_flows = df[df["is_attack"] == True]
+        if attack_flows.empty:
+            return findings
+
+        distinct_types = attack_flows["attack_type"].unique().tolist()
+        n_types = len(distinct_types)
+
+        if n_types < MULTI_VECTOR_MIN_TYPES:
+            return findings
+
+        type_breakdown = {
+            t: int((attack_flows["attack_type"] == t).sum())
+            for t in distinct_types
+        }
+        dominant = max(type_breakdown, key=lambda t: type_breakdown[t])
+
+        findings.append(
+            HuntingFinding(
+                rule_id="R005",
+                rule_name="Multi-Vector DDoS Detection",
+                severity="CRITICAL" if n_types >= 5 else "HIGH",
+                description=(
+                    f"Multi-vector attack campaign: {n_types} distinct attack types "
+                    f"observed simultaneously — coordinated threat actor likely"
+                ),
+                evidence={
+                    "distinct_attack_types": n_types,
+                    "attack_types": distinct_types,
+                    "type_breakdown": type_breakdown,
+                    "dominant_type": dominant,
+                    "total_attack_flows": int(len(attack_flows)),
+                    "threshold_types": MULTI_VECTOR_MIN_TYPES,
+                },
+                affected_flows=int(len(attack_flows)),
+                flow_indices=list(attack_flows.index),
+            )
+        )
+        logger.warning(
+            "Rule 5 triggered: %d distinct attack types detected (multi-vector)",
+            n_types,
         )
 
         return findings

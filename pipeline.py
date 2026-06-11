@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pipeline")
 
-DEFAULT_CSV = Path(__file__).parent / "sample_data.csv"
+DEFAULT_CSV = Path(__file__).parent / "sample_data_5k.csv"
 
 
 class PipelineResult:
@@ -47,6 +47,12 @@ class PipelineResult:
         if self.classified_df.empty or "is_attack" not in self.classified_df.columns:
             return 0
         return int(self.classified_df["is_attack"].sum())
+
+    @property
+    def benign_count(self) -> int:
+        if self.classified_df.empty or "is_attack" not in self.classified_df.columns:
+            return 0
+        return int((~self.classified_df["is_attack"]).sum())
 
     @property
     def records_processed(self) -> int:
@@ -193,7 +199,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--csv",
         default=str(DEFAULT_CSV),
-        help="Path to network flow CSV (default: sample_data.csv)",
+        help="Path to network flow CSV (default: sample_data_5k.csv)",
     )
     parser.add_argument(
         "--no-agent",
