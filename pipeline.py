@@ -43,16 +43,34 @@ class PipelineResult:
         self.error: str | None = None
 
     @property
+    def has_ground_truth(self) -> bool:
+        return (
+            not self.classified_df.empty
+            and "true_label" in self.classified_df.columns
+        )
+
+    @property
     def attacks_detected(self) -> int:
+        """Model-predicted attack count."""
         if self.classified_df.empty or "is_attack" not in self.classified_df.columns:
             return 0
         return int(self.classified_df["is_attack"].sum())
 
     @property
     def benign_count(self) -> int:
+        """Ground-truth benign count when available; falls back to model prediction."""
+        if self.has_ground_truth:
+            return int((self.classified_df["true_label"] == "Benign").sum())
         if self.classified_df.empty or "is_attack" not in self.classified_df.columns:
             return 0
         return int((~self.classified_df["is_attack"]).sum())
+
+    @property
+    def true_attacks_count(self) -> int:
+        """Ground-truth attack count (None when no label column present)."""
+        if not self.has_ground_truth:
+            return 0
+        return int((self.classified_df["true_label"] != "Benign").sum())
 
     @property
     def records_processed(self) -> int:
@@ -68,6 +86,7 @@ def run_pipeline(
     batch_size: int = 200,
     on_progress: ProgressCallback | None = None,
     use_agent: bool = True,
+    benign_threshold: float = 0.0,
 ) -> PipelineResult:
     """
     Execute the full security operations pipeline on a CSV dataset.
@@ -96,6 +115,12 @@ def run_pipeline(
         # ── Stage 1: Load dataset ──────────────────────────────────────────────
         _progress("Loading dataset", 0, 1)
         df = pd.read_csv(csv_path)
+        # Preserve ground truth label column if present (CIC-DDoS2019 datasets
+        # include a 'label' column with the true class — rename so it survives
+        # classification without colliding with predicted 'attack_type').
+        if "label" in df.columns:
+            df = df.rename(columns={"label": "true_label"})
+            logger.info("Ground truth 'label' column preserved as 'true_label'")
         _progress("Dataset loaded", len(df), len(df))
         logger.info("Loaded %d records from %s", len(df), csv_path)
 
@@ -103,7 +128,7 @@ def run_pipeline(
         _progress("Classifying flows", 0, len(df))
         # Classifier auto-downloads from Google Drive
         clf = NetworkFlowClassifier()
-        result.classified_df = clf.classify_batch(df, batch_size=batch_size)
+        result.classified_df = clf.classify_batch(df, batch_size=batch_size, benign_threshold=benign_threshold)
         _progress("Classification complete", len(df), len(df))
         logger.info(
             "Classification done — %d attacks in %d records",

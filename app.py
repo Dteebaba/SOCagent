@@ -86,6 +86,15 @@ with st.sidebar:
     csv_path = st.text_input("Dataset CSV", value=str(DATA_PATH))
     use_agent = st.toggle("Enable AI Agent (OpenAI)", value=True)
     batch_size = st.slider("Classifier batch size", 50, 500, 200, step=50)
+    benign_threshold = st.slider(
+        "Benign detection threshold",
+        min_value=0.0, max_value=0.9, value=0.3, step=0.05,
+        help=(
+            "If the model's Benign class probability ≥ this value, the flow is "
+            "classified as Benign. Set to 0.0 to use raw model argmax (all attacks). "
+            "0.2–0.4 is recommended for this imbalanced model."
+        ),
+    )
 
     st.divider()
     run_btn = st.button("▶ Run Pipeline", type="primary", use_container_width=True)
@@ -120,24 +129,50 @@ def _check_prerequisites() -> tuple[bool, str]:
 def _render_metric_row(result) -> None:
     c1, c2, c3 = st.columns(3)
     c1.metric("Dataset Rows Analyzed", f"{result.records_processed:,}")
-    c2.metric(
-        "Threats Discovered",
-        f"{result.attacks_detected:,}",
-        delta=f"{result.attacks_detected / max(result.records_processed, 1) * 100:.1f}% of dataset",
-    )
-    c3.metric("Benign Found", f"{result.benign_count:,}")
+
+    if result.has_ground_truth:
+        c2.metric(
+            "Threats (Ground Truth)",
+            f"{result.true_attacks_count:,}",
+            delta=f"{result.true_attacks_count / max(result.records_processed, 1) * 100:.1f}% of dataset",
+        )
+        c3.metric(
+            "Benign (Ground Truth)",
+            f"{result.benign_count:,}",
+            delta=f"{result.benign_count / max(result.records_processed, 1) * 100:.1f}% of dataset",
+        )
+    else:
+        c2.metric(
+            "Threats Discovered (Model)",
+            f"{result.attacks_detected:,}",
+            delta=f"{result.attacks_detected / max(result.records_processed, 1) * 100:.1f}% of dataset",
+        )
+        c3.metric("Benign Found (Model)", f"{result.benign_count:,}")
+
+    if result.has_ground_truth:
+        model_attack_pct = result.attacks_detected / max(result.records_processed, 1) * 100
+        truth_attack_pct = result.true_attacks_count / max(result.records_processed, 1) * 100
+        st.warning(
+            f"**Model vs Ground Truth**: The Random Forest model predicted "
+            f"**{result.attacks_detected:,} attacks ({model_attack_pct:.1f}%)** but ground truth shows "
+            f"**{result.true_attacks_count:,} attacks ({truth_attack_pct:.1f}%)** and "
+            f"**{result.benign_count:,} benign flows**. "
+            f"The model (`rf_model_imbalanced.pkl`) is biased toward attack classes — it mis-classifies "
+            f"benign traffic as attacks. Use the **Classification** tab to see the full breakdown."
+        )
 
     with st.expander("ℹ️ What counts as a Threat?"):
         st.markdown(
-            "**Threats Discovered** = network flows the Random Forest model classified as "
-            "any non-Benign label from the CIC-DDoS2019 dataset. This includes:\n\n"
+            "**Threats (Ground Truth)** = flows whose dataset label is any non-Benign class. "
+            "**Threats (Model)** = flows the Random Forest model predicted as non-Benign — "
+            "note the imbalanced model over-predicts attacks.\n\n"
             "- **DrDoS amplification variants**: DrDoS_DNS, DrDoS_LDAP, DrDoS_MSSQL, "
             "DrDoS_NTP, DrDoS_NetBIOS, DrDoS_SNMP, DrDoS_UDP\n"
             "- **Direct flood attacks**: LDAP, MSSQL, NetBIOS, Portmap, Syn, TFTP, "
             "UDP, UDP-lag, UDPLag, WebDDoS\n\n"
-            "**Benign Found** = flows the model identified as normal, non-malicious traffic.\n\n"
-            "*Note: Because Benign samples are part of the training distribution, the model "
-            "classifies them correctly — Benign flows are not counted as threats.*"
+            "**Benign Found** = flows with ground truth label `Benign` — normal, non-malicious traffic.\n\n"
+            "**Threat Findings (Rule-Based)** = higher-level *events* detected by the threat hunter "
+            "(e.g., a cluster of 500 Syn flows = 1 finding). Each finding may cover many individual flows."
         )
 
     st.markdown("")
@@ -154,24 +189,64 @@ def _render_metric_row(result) -> None:
 def _render_classification_tab(df: pd.DataFrame) -> None:
     st.subheader("Classification Results")
 
+    has_gt = "true_label" in df.columns
+
+    # ── Ground-truth vs Model accuracy banner ─────────────────────────────────
+    if has_gt:
+        gt_benign = (df["true_label"] == "Benign").sum()
+        gt_attack = (df["true_label"] != "Benign").sum()
+        model_correct = (
+            (df["true_label"] == "Benign") & (~df["is_attack"])
+            | (df["true_label"] != "Benign") & df["is_attack"]
+        ).sum()
+        accuracy = model_correct / max(len(df), 1) * 100
+
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("True Attacks", f"{gt_attack:,}", help="Ground truth label ≠ Benign")
+        a2.metric("True Benign", f"{gt_benign:,}", help="Ground truth label = Benign")
+        a3.metric("Model Accuracy", f"{accuracy:.1f}%", help="Fraction of rows model predicted correctly")
+        model_benign = (~df["is_attack"]).sum()
+        a4.metric(
+            "Model Benign Predicted",
+            f"{model_benign:,}",
+            delta=f"{model_benign - gt_benign:+,} vs truth",
+            delta_color="inverse",
+        )
+        st.divider()
+
+    # ── Row 1: distribution charts ────────────────────────────────────────────
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("**Attack Type Distribution**")
-        counts = df["attack_type"].value_counts().head(10)
-        fig, ax = plt.subplots(figsize=(5, 4), facecolor="#1e2130")
+        if has_gt:
+            st.markdown("**Ground Truth Label Distribution**")
+            counts = df["true_label"].value_counts()
+            title = "True Label Distribution"
+        else:
+            st.markdown("**Classifier Label Distribution**")
+            counts = df["attack_type"].value_counts()
+            title = "Classifier Predicted Distribution"
+
+        bar_colours = ["#22c55e" if lbl == "Benign" else "#ef4444" for lbl in counts.index]
+        fig, ax = plt.subplots(figsize=(5, max(3, len(counts) * 0.35)), facecolor="#1e2130")
         ax.set_facecolor("#1e2130")
-        wedges, texts, autotexts = ax.pie(
-            counts.values,
-            labels=counts.index,
-            autopct="%1.1f%%",
-            startangle=90,
-            textprops={"color": "#e2e8f0", "fontsize": 9},
-        )
-        for at in autotexts:
-            at.set_color("#0f1117")
-            at.set_fontsize(8)
-        ax.set_title("Attack Label Distribution", color="#e2e8f0", pad=10)
+        ax.tick_params(colors="#94a3b8", labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#334155")
+        bars = ax.barh(counts.index[::-1], counts.values[::-1], color=bar_colours[::-1], height=0.6)
+        # Add count + % labels on each bar
+        total = counts.sum()
+        for bar, val in zip(bars, counts.values[::-1]):
+            ax.text(
+                bar.get_width() + total * 0.005,
+                bar.get_y() + bar.get_height() / 2,
+                f"{val:,} ({val/total*100:.1f}%)",
+                va="center", ha="left", color="#94a3b8", fontsize=7,
+            )
+        ax.set_xlabel("Flow Count", color="#94a3b8", fontsize=8)
+        ax.set_title(title, color="#e2e8f0", pad=8, fontsize=10)
+        ax.set_xlim(0, counts.max() * 1.35)
+        fig.tight_layout()
         st.pyplot(fig)
         plt.close(fig)
 
@@ -182,38 +257,125 @@ def _render_classification_tab(df: pd.DataFrame) -> None:
         ax2.tick_params(colors="#94a3b8")
         for spine in ax2.spines.values():
             spine.set_edgecolor("#334155")
-        attacks_df = df[df["is_attack"] == True]
-        normal_df = df[df["is_attack"] == False]
-        if not normal_df.empty:
-            ax2.hist(
-                normal_df["confidence"],
-                bins=20,
-                alpha=0.7,
-                color="#22c55e",
-                label="Benign",
-            )
-        if not attacks_df.empty:
-            ax2.hist(
-                attacks_df["confidence"],
-                bins=20,
-                alpha=0.7,
-                color="#ef4444",
-                label="Attack",
-            )
+
+        if has_gt:
+            benign_df = df[df["true_label"] == "Benign"]
+            attack_df = df[df["true_label"] != "Benign"]
+            benign_label = "True Benign"
+            attack_label = "True Attack"
+        else:
+            benign_df = df[~df["is_attack"]]
+            attack_df = df[df["is_attack"]]
+            benign_label = "Model Benign"
+            attack_label = "Model Attack"
+
+        if not benign_df.empty:
+            ax2.hist(benign_df["confidence"], bins=20, alpha=0.7, color="#22c55e", label=benign_label)
+        if not attack_df.empty:
+            ax2.hist(attack_df["confidence"], bins=20, alpha=0.7, color="#ef4444", label=attack_label)
         ax2.set_xlabel("Confidence Score", color="#94a3b8")
         ax2.set_ylabel("Count", color="#94a3b8")
-        ax2.set_title("Model Confidence", color="#e2e8f0")
+        ax2.set_title("Model Confidence by True Class", color="#e2e8f0")
         ax2.legend(facecolor="#1e2130", labelcolor="#e2e8f0")
         st.pyplot(fig2)
         plt.close(fig2)
 
-    st.markdown("**Sample Records (attacks only)**")
-    available_cols = ["attack_type", "confidence"]
-    for col in ["Flow Packets/s", "Flow Bytes/s", "Flow Duration"]:
-        if col in df.columns:
-            available_cols.append(col)
+    st.divider()
 
-    sample = df[df["is_attack"] == True][available_cols].head(20).reset_index(drop=True)
+    # ── Non-Attack / Benign Traffic Section ───────────────────────────────────
+    st.subheader("Non-Attack Traffic (Benign Flows)")
+
+    if has_gt:
+        benign_flows = df[df["true_label"] == "Benign"].copy()
+        source_note = "Source: ground truth `true_label` column"
+    else:
+        benign_flows = df[~df["is_attack"]].copy()
+        source_note = "Source: model prediction (`attack_type == 'Benign'`)"
+
+    if benign_flows.empty:
+        st.info(
+            "No benign flows found. The model did not predict any flows as Benign "
+            "— this is expected for `rf_model_imbalanced.pkl` which is biased toward attack labels. "
+            "Re-train with balanced classes or apply post-hoc threshold tuning to recover benign predictions."
+        )
+    else:
+        st.caption(f"{len(benign_flows):,} benign flows identified · {source_note}")
+
+        # Benign model misclassification breakdown
+        if has_gt:
+            misclassified = benign_flows[benign_flows["is_attack"]]
+            correctly_benign = benign_flows[~benign_flows["is_attack"]]
+            b1, b2, b3 = st.columns(3)
+            b1.metric("True Benign Flows", f"{len(benign_flows):,}")
+            b2.metric(
+                "Correctly Identified by Model",
+                f"{len(correctly_benign):,}",
+                delta=f"{len(correctly_benign)/max(len(benign_flows),1)*100:.1f}%",
+            )
+            b3.metric(
+                "Mis-classified as Attack",
+                f"{len(misclassified):,}",
+                delta=f"{len(misclassified)/max(len(benign_flows),1)*100:.1f}% missed",
+                delta_color="inverse",
+            )
+
+            if not misclassified.empty:
+                st.markdown("**Model incorrectly labelled these benign flows as attacks:**")
+                mc_cols = ["attack_type", "confidence"]
+                for c in ["Flow Packets/s", "Flow Bytes/s", "Flow Duration"]:
+                    if c in misclassified.columns:
+                        mc_cols.append(c)
+                st.dataframe(
+                    misclassified[mc_cols].head(30).reset_index(drop=True)
+                    .style.background_gradient(subset=["confidence"], cmap="Oranges"),
+                    use_container_width=True,
+                )
+
+        # Benign flow stats
+        display_cols = []
+        for c in ["true_label", "attack_type", "confidence", "Flow Packets/s", "Flow Bytes/s", "Flow Duration"]:
+            if c in benign_flows.columns:
+                display_cols.append(c)
+
+        st.markdown("**Sample Benign Flow Records**")
+        st.dataframe(
+            benign_flows[display_cols].head(30).reset_index(drop=True)
+            .style.background_gradient(subset=["confidence"], cmap="Greens"),
+            use_container_width=True,
+        )
+
+        # Feature distributions for benign vs attack
+        st.markdown("**Benign vs Attack Feature Comparison**")
+        feat_options = [c for c in ["Flow Packets/s", "Flow Bytes/s", "Flow Duration", "Packet Length Mean"] if c in df.columns]
+        if feat_options:
+            selected_feat = st.selectbox("Feature to compare:", feat_options, key="benign_feat_sel")
+            fig3, ax3 = plt.subplots(figsize=(8, 3), facecolor="#1e2130")
+            ax3.set_facecolor("#1e2130")
+            ax3.tick_params(colors="#94a3b8")
+            for spine in ax3.spines.values():
+                spine.set_edgecolor("#334155")
+
+            attack_df_plot = df[df["true_label"] != "Benign"] if has_gt else df[df["is_attack"]]
+            ax3.hist(benign_flows[selected_feat].clip(lower=0), bins=40, alpha=0.7, color="#22c55e", label="Benign", density=True)
+            ax3.hist(attack_df_plot[selected_feat].clip(lower=0), bins=40, alpha=0.7, color="#ef4444", label="Attack", density=True)
+            ax3.set_xlabel(selected_feat, color="#94a3b8")
+            ax3.set_ylabel("Density", color="#94a3b8")
+            ax3.set_title(f"{selected_feat} — Benign vs Attack", color="#e2e8f0")
+            ax3.legend(facecolor="#1e2130", labelcolor="#e2e8f0")
+            st.pyplot(fig3)
+            plt.close(fig3)
+
+    st.divider()
+
+    # ── Attack records ────────────────────────────────────────────────────────
+    st.markdown("**Sample Attack Flow Records**")
+    available_cols = []
+    for c in ["true_label", "attack_type", "confidence", "Flow Packets/s", "Flow Bytes/s", "Flow Duration"]:
+        if c in df.columns:
+            available_cols.append(c)
+
+    attack_source = df[df["true_label"] != "Benign"] if has_gt else df[df["is_attack"]]
+    sample = attack_source[available_cols].head(20).reset_index(drop=True)
     if not sample.empty:
         st.dataframe(
             sample.style.background_gradient(subset=["confidence"], cmap="Reds"),
@@ -507,6 +669,7 @@ if run_btn:
             batch_size=batch_size,
             on_progress=on_progress,
             use_agent=use_agent,
+            benign_threshold=benign_threshold,
         )
 
     progress_bar.empty()

@@ -197,7 +197,7 @@ class NetworkFlowClassifier:
 
         return X_raw, X_scaled
 
-    def classify(self, df: pd.DataFrame) -> pd.DataFrame:
+    def classify(self, df: pd.DataFrame, benign_threshold: float = 0.0) -> pd.DataFrame:
         """
         Classify network flow records.
 
@@ -205,6 +205,11 @@ class NetworkFlowClassifier:
         ----------
         df : pd.DataFrame
             DataFrame containing the 30 CIC-DDoS2019 feature columns.
+        benign_threshold : float
+            If the model's probability for the Benign class meets or exceeds
+            this value, the flow is classified as Benign regardless of argmax.
+            Use 0.0 (default) to use raw argmax with no override.
+            Values like 0.2–0.4 help recover benign flows from an imbalanced model.
 
         Returns
         -------
@@ -213,6 +218,7 @@ class NetworkFlowClassifier:
             - attack_type  : predicted class label
             - confidence   : probability of predicted class (0-1)
             - is_attack    : True when label != Benign
+            - benign_prob  : model's raw probability for the Benign class
             - class_probs  : dict mapping each class to its probability
             - shap_values  : feature importance (if SHAP enabled)
         """
@@ -229,11 +235,34 @@ class NetworkFlowClassifier:
         else:
             attack_types = predictions
 
+        attack_types = list(attack_types)
+
+        # Apply Benign threshold override when the model's imbalance suppresses Benign
+        benign_idx = None
+        if "Benign" in self.classes_:
+            benign_idx = list(self.classes_).index("Benign")
+
+        if benign_threshold > 0.0 and benign_idx is not None:
+            for i, prob_row in enumerate(probabilities):
+                if prob_row[benign_idx] >= benign_threshold:
+                    attack_types[i] = "Benign"
+
         # Build result
         result = df.copy()
         result["attack_type"] = attack_types
-        result["confidence"] = probabilities.max(axis=1).round(4)
         result["is_attack"] = result["attack_type"] != "Benign"
+        # confidence = probability of the final predicted class
+        result["confidence"] = [
+            round(float(probabilities[i, list(self.classes_).index(attack_types[i])]), 4)
+            if attack_types[i] in self.classes_
+            else round(float(probabilities[i].max()), 4)
+            for i in range(len(attack_types))
+        ]
+        result["benign_prob"] = (
+            probabilities[:, benign_idx].round(4)
+            if benign_idx is not None
+            else 0.0
+        )
         result["class_probs"] = [
             {cls: round(float(prob), 4) for cls, prob in zip(self.classes_, row)}
             for row in probabilities
@@ -298,7 +327,7 @@ class NetworkFlowClassifier:
         )
         return sorted_features[:top_n]
 
-    def classify_batch(self, df: pd.DataFrame, batch_size: int = 200) -> pd.DataFrame:
+    def classify_batch(self, df: pd.DataFrame, batch_size: int = 200, benign_threshold: float = 0.0) -> pd.DataFrame:
         """
         Classify in batches to manage memory for large datasets.
 
@@ -308,6 +337,8 @@ class NetworkFlowClassifier:
             DataFrame containing the 30 CIC-DDoS2019 feature columns.
         batch_size : int
             Number of rows to process per batch.
+        benign_threshold : float
+            Passed through to classify(). See classify() docstring.
 
         Returns
         -------
@@ -315,14 +346,14 @@ class NetworkFlowClassifier:
             Classified DataFrame with all rows.
         """
         if len(df) <= batch_size:
-            return self.classify(df)
+            return self.classify(df, benign_threshold=benign_threshold)
 
         logger.info("Classifying %d records in batches of %d", len(df), batch_size)
         results = []
 
         for i in range(0, len(df), batch_size):
             batch = df.iloc[i : i + batch_size]
-            batch_result = self.classify(batch)
+            batch_result = self.classify(batch, benign_threshold=benign_threshold)
             results.append(batch_result)
 
             if (i // batch_size + 1) % 10 == 0:
@@ -338,14 +369,15 @@ class NetworkFlowClassifier:
         )
         return final_result
 
-    def classify_single(self, row: dict) -> dict:
+    def classify_single(self, row: dict, benign_threshold: float = 0.0) -> dict:
         """Classify a single flow record passed as a dictionary."""
         df = pd.DataFrame([row])
-        result = self.classify(df)
+        result = self.classify(df, benign_threshold=benign_threshold)
         return {
             "attack_type": result["attack_type"].iloc[0],
             "confidence": result["confidence"].iloc[0],
             "is_attack": result["is_attack"].iloc[0],
+            "benign_prob": result["benign_prob"].iloc[0],
             "class_probs": result["class_probs"].iloc[0],
             "shap_values": result["shap_values"].iloc[0],
         }
